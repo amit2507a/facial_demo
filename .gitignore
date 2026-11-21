@@ -1,0 +1,40 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Secrets
+.env
+.env.*
+
+# Datasets and generated output (may contain faces)
+data/
+outputs/
+
+# Downloaded or trained model weights
+models/
+*.onnx
+*.pt
+*.pth
+
+# Face images, video, and embeddings must never reach this public repo
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.webp
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.npy
+*.npz
+
+# Editor and OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
