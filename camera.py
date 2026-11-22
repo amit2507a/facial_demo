@@ -1,8 +1,8 @@
-"""Stage 1: open the webcam, explore what a frame is, and measure performance.
+"""Live webcam viewer with face detection and performance measurements.
 
 Run:  python camera.py
 Keys: 1 color | 2 gray | 3 blue | 4 green | 5 red | 6 low-res
-      m mirror | q or Esc quit
+      d detection | m mirror | q or Esc quit
 """
 
 import argparse
@@ -13,8 +13,20 @@ from collections.abc import Callable
 import cv2
 import numpy as np
 
-WINDOW_NAME = "Stage 1 - Camera"
+from detector import Face, FaceDetector, mirror_face
+
+WINDOW_NAME = "Facial Demo - Camera"
 MAX_READ_FAILURES = 30  # About one second of failures at 30 FPS.
+
+# OpenCV colors are BGR too, so (0, 255, 0) is green.
+BOX_COLOR = (0, 255, 0)
+LANDMARK_COLORS = {
+    "right_eye": (255, 120, 0),
+    "left_eye": (0, 200, 255),
+    "nose": (0, 255, 255),
+    "right_mouth": (255, 0, 255),
+    "left_mouth": (120, 120, 255),
+}
 
 
 class FPSMeter:
@@ -98,6 +110,30 @@ def draw_overlay(image: np.ndarray, lines: list[str]) -> None:
         cv2.putText(image, line, position, font, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
 
+def draw_faces(image: np.ndarray, faces: list[Face]) -> None:
+    """Draw each face's box, confidence, and landmarks in place."""
+    for face in faces:
+        # Drawing functions need whole-number pixel coordinates.
+        left, top = round(face.x), round(face.y)
+        right, bottom = round(face.x + face.width), round(face.y + face.height)
+        cv2.rectangle(image, (left, top), (right, bottom), BOX_COLOR, 2)
+
+        # Put the label inside the box when there is no room above it.
+        label_y = top - 8 if top >= 24 else top + 20
+        cv2.putText(
+            image,
+            f"{face.score:.2f}",
+            (left + 2, label_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            BOX_COLOR,
+            2,
+            cv2.LINE_AA,
+        )
+        for name, (x, y) in face.landmarks.items():
+            cv2.circle(image, (round(x), round(y)), 3, LANDMARK_COLORS[name], -1, cv2.LINE_AA)
+
+
 def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
     # DirectShow opens webcams faster and more reliably on Windows.
     backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
@@ -122,22 +158,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=480, help="requested frame height")
     parser.add_argument("--frames", type=int, default=0, help="stop after N frames (0 = run)")
     parser.add_argument("--no-window", action="store_true", help="measure without display")
+    parser.add_argument("--no-detect", action="store_true", help="start with detection off")
+    parser.add_argument("--input-width", type=int, default=320, help="detector input width")
+    parser.add_argument("--threshold", type=float, default=0.8, help="detector confidence")
     return parser.parse_args()
 
 
 def run(args: argparse.Namespace) -> int:
     try:
+        detector = FaceDetector(input_width=args.input_width, score_threshold=args.threshold)
         capture = open_camera(args.camera, args.width, args.height)
-    except RuntimeError as error:
+    except (FileNotFoundError, RuntimeError, ValueError, cv2.error) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
 
     meter = FPSMeter()
     view_key = "1"
     mirror = True
+    detecting = not args.no_detect
     frames = 0
     failures = 0
+    frames_with_faces = 0
     total_work = 0.0
+    total_detect = 0.0
     started = time.perf_counter()
     exit_code = 0
 
@@ -155,11 +198,19 @@ def run(args: argparse.Namespace) -> int:
             failures = 0
 
             work_start = time.perf_counter()
+            height, width, channels = frame.shape
+
+            # Detect before mirroring so left and right landmarks stay correct.
+            faces = detector.detect(frame) if detecting else []
+            detect_ms = (time.perf_counter() - work_start) * 1000
+            total_detect += detect_ms
+            frames_with_faces += bool(faces)
+
             if mirror:
-                frame = cv2.flip(frame, 1)  # Flip first so overlay text stays readable.
+                frame = cv2.flip(frame, 1)  # Flip before drawing so text stays readable.
+                faces = [mirror_face(face, width) for face in faces]
             label, view = VIEWS[view_key]
             output = view(frame)
-            height, width, channels = frame.shape
             fps = meter.update()
             work_ms = (time.perf_counter() - work_start) * 1000
             total_work += work_ms
@@ -168,13 +219,16 @@ def run(args: argparse.Namespace) -> int:
             if args.no_window:
                 continue
 
+            draw_faces(output, faces)
+            status = f"{len(faces)} face(s), {detect_ms:.1f} ms" if detecting else "off"
             draw_overlay(
                 output,
                 [
                     f"View: {label}",
                     f"FPS: {fps:.1f}   Work: {work_ms:.1f} ms",
+                    f"Detection: {status}",
                     f"Shape: ({height}, {width}, {channels})  {frame.dtype}",
-                    "1-6 views | m mirror | q quit",
+                    "1-6 views | d detect | m mirror | q quit",
                 ],
             )
             cv2.imshow(WINDOW_NAME, output)
@@ -186,6 +240,8 @@ def run(args: argparse.Namespace) -> int:
                 break
             if char == "m":
                 mirror = not mirror
+            elif char == "d":
+                detecting = not detecting
             elif char in VIEWS:
                 view_key = char
             # Stops cleanly when the user clicks the window's X button.
@@ -204,6 +260,8 @@ def run(args: argparse.Namespace) -> int:
         print(f"Frames: {frames}")
         print(f"Average FPS: {frames / elapsed:.1f}")
         print(f"Average processing: {total_work / frames:.2f} ms per frame")
+        print(f"Average detection: {total_detect / frames:.2f} ms per frame")
+        print(f"Frames with a face: {frames_with_faces}/{frames}")
     return exit_code
 
 
